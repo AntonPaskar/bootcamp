@@ -4,6 +4,9 @@ import HashMap "mo:base/HashMap";
 import Iter "mo:base/Iter";
 import Principal "mo:base/Principal";
 import Option "mo:base/Option";
+import Nat64 "mo:base/Nat64";
+import Time "mo:base/Time";
+import Array "mo:base/Array";
 import Types "types";
 actor {
     // For this level we need to make use of the code implemented in the previous projects.
@@ -158,22 +161,141 @@ actor {
         };
         return total;
     };
+
+    func _burn(owner : Principal, amount : Nat) : () {
+        let balance = Option.get(ledger.get(owner), 0);
+        ledger.put(owner, balance - amount);
+        return;
+    };
     /////////////////
     // PROJECT #4 //
     ///////////////
+    var nextProposalId : Nat64 = 0;
+    let proposals = HashMap.HashMap<ProposalId, Proposal>(0, Nat64.equal, Nat64.toNat32);
+
+    func _isMember(principal : Principal) : async Result<Member, Text> {
+        switch (members.get(principal)) {
+            case null return #err("Caller are not a member!");
+            case (?member) #ok(member);
+        };
+    };
+
+    func _isProposal(proposalId : ProposalId) : async Result<Proposal, Text> {
+        switch (proposals.get(proposalId)) {
+            case null return #err("Proposal are not exist!");
+            case (?proposal) return #ok(proposal);
+        };
+    };
+
     public shared ({ caller }) func createProposal(content : ProposalContent) : async Result<ProposalId, Text> {
-        return #err("Not implemented");
+        switch (await _isMember(caller)) {
+            case (#err(e)) return #err(e);
+            case (#ok(_)) {};
+        };
+
+        let balance = Option.get(ledger.get(caller), 0);
+        if (balance < 1) {
+            return #err("Caller don't have enough tokens!");
+        };
+        let proposal = {
+            id = nextProposalId;
+            content;
+            creator = caller;
+            created = Time.now();
+            executed = null;
+            votes = [];
+            voteScore = 0;
+            status = #Open;
+        };
+        nextProposalId += 1;
+        proposals.put(proposal.id, proposal);
+        _burn(caller, 1);
+        return #ok(proposal.id);
     };
 
     public query func getProposal(proposalId : ProposalId) : async ?Proposal {
-        return null;
+        return proposals.get(proposalId);
     };
 
     public shared ({ caller }) func voteProposal(proposalId : ProposalId, yesOrNo : Bool) : async Result<(), Text> {
-        return #err("Not implemented");
+        switch (await _isMember(caller)) {
+            case (#err(e)) return #err(e);
+            case (#ok(_)) {};
+        };
+
+        switch (await _isProposal(proposalId)) {
+            case (#err(e)) return #err(e);
+            case (#ok(proposal)) {
+                if (proposal.status != #Open) {
+                    return #err("Proposal are not opened!");
+                };
+
+                if (_hasVoted(proposal, caller)) {
+                    return #err("Already has a vote by this caller!");
+                };
+
+                let balance = Option.get(ledger.get(caller), 0);
+
+                let multiplierVote = switch (yesOrNo) {
+                    case (true) { 1 };
+                    case (false) { -1 };
+                };
+
+                let newVoteScore = proposal.voteScore + multiplierVote * balance;
+                var newExecuted : ?Time.Time = null;
+                let newVotes = Buffer.fromArray<Vote>(proposal.votes);
+                let newStatus = if (newVoteScore >= 100) {
+                    #Accepted;
+                } else if (newVoteScore <= -100) {
+                    #Rejected;
+                } else {
+                    #Open;
+                };
+                switch (newStatus) {
+                    case (#Accepted) {
+                        _executeProposal(proposal.content);
+                        newExecuted := ?Time.now();
+                    };
+                    case (_) {};
+                };
+                let newProposal : Proposal = {
+                    id = proposal.id;
+                    content = proposal.content;
+                    creator = proposal.creator;
+                    created = proposal.created;
+                    executed = newExecuted;
+                    votes = Buffer.toArray(newVotes);
+                    voteScore = newVoteScore;
+                    status = newStatus;
+                };
+                proposals.put(proposal.id, newProposal);
+                return #ok();
+            };
+        };
+    };
+
+    func _hasVoted(proposal : Proposal, member : Principal) : Bool {
+        return Array.find<Vote>(
+            proposal.votes,
+            func(vote : Vote) {
+                return vote.member == member;
+            },
+        ) != null;
+    };
+
+    func _executeProposal(content : ProposalContent) : () {
+        switch (content) {
+            case (#ChangeManifesto(newManifesto)) {
+                manifesto := newManifesto;
+            };
+            case (#AddGoal(newGoal)) {
+                goals.add(newGoal);
+            };
+        };
+        return;
     };
 
     public query func getAllProposals() : async [Proposal] {
-        return [];
+        return Iter.toArray(proposals.vals());
     };
 };
